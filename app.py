@@ -118,15 +118,22 @@ def insert_mixed_text(page, pos: tuple, text: str, fontsize: float, color: tuple
     x, y = pos
     segments = split_text_by_script(text)
     
-    for segment_text, is_cjk in segments:
+    for idx, (segment_text, is_cjk) in enumerate(segments):
         fontname = "china-ss" if is_cjk else "helv"
         page.insert_text((x, y), segment_text, fontsize=fontsize, fontname=fontname, color=color)
         
         # 计算这段文字的宽度，移动 x 坐标
+        # 中文字符宽度约等于字号，英文约为字号的 0.52
         if is_cjk:
-            x += len(segment_text) * fontsize * 0.9
+            x += len(segment_text) * fontsize * 1.0
         else:
-            x += len(segment_text) * fontsize * 0.5
+            x += len(segment_text) * fontsize * 0.52
+        
+        # 中英文切换时添加小间距
+        if idx < len(segments) - 1:
+            next_is_cjk = segments[idx + 1][1]
+            if is_cjk != next_is_cjk:
+                x += fontsize * 0.1  # 切换时加一点间距
     
     return x
 
@@ -187,11 +194,11 @@ def get_type_color(annot_type: str) -> Tuple[float, float, float]:
 
 def wrap_text(text: str, max_width: float, fontsize: float, has_cjk: bool = False) -> List[str]:
     """将文本按宽度换行"""
-    # 中文字符宽度约为英文的1.5-2倍
+    # 中文字符宽度约等于字号，英文约为 0.52
     if has_cjk:
-        char_width = fontsize * 0.9
+        char_width = fontsize * 1.0
     else:
-        char_width = fontsize * 0.5
+        char_width = fontsize * 0.52
     chars_per_line = int(max_width / char_width)
     
     lines = []
@@ -241,9 +248,9 @@ def calc_text_width(text: str, fontsize: float) -> float:
     width = 0
     for char in text:
         if is_cjk_char(char):
-            width += fontsize * 0.9
+            width += fontsize * 1.0
         else:
-            width += fontsize * 0.5
+            width += fontsize * 0.52
     return width
 
 
@@ -264,11 +271,11 @@ def wrap_text_mixed(text: str, max_width: float, fontsize: float) -> List[str]:
         while i < len(para):
             char = para[i]
             
-            # 计算这个字符的宽度
+            # 计算这个字符的宽度 (中文=1.0, 英文=0.52)
             if is_cjk_char(char):
-                char_width = fontsize * 0.9
+                char_width = fontsize * 1.0
             else:
-                char_width = fontsize * 0.5
+                char_width = fontsize * 0.52
             
             # 检查是否需要换行
             if current_width + char_width > max_width:
@@ -415,13 +422,13 @@ def estimate_entry_height(info: AnnotationInfo, width: float) -> float:
     
     if info.text_snippet:
         has_cjk = contains_cjk(info.text_snippet)
-        char_factor = 0.9 if has_cjk else 0.5
+        char_factor = 1.0 if has_cjk else 0.52
         lines = len(info.text_snippet) / (width / (8.5 * char_factor)) + 1
         height += min(lines * 11 + 12, 75)
     
     if info.content:
         has_cjk = contains_cjk(info.content)
-        char_factor = 0.9 if has_cjk else 0.5
+        char_factor = 1.0 if has_cjk else 0.52
         lines = len(info.content) / (width / (9.5 * char_factor)) + info.content.count('\n') + info.content.count('\r') + 1
         height += min(lines * 12 + 14, 200)
     else:

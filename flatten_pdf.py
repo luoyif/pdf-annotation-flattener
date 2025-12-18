@@ -2,8 +2,8 @@
 """
 PDF Annotation Flattener - Command Line Tool
 =============================================
-Flatten PDF annotations (highlights, notes, strikeouts, etc.) onto pages
-and generate summary pages for easy sharing.
+Flatten PDF annotations onto pages with summary
+Supports Chinese/CJK content / 支持中文批注
 
 Usage:
     python flatten_pdf.py input.pdf
@@ -18,14 +18,96 @@ Requirements:
 import fitz  # PyMuPDF
 import sys
 import os
+import re
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Tuple
 
 
+# ================== 中文支持 & 混合字体渲染 ==================
+
+def is_cjk_char(char: str) -> bool:
+    """检测单个字符是否为中日韩字符"""
+    if len(char) != 1:
+        return False
+    code = ord(char)
+    return (
+        0x4e00 <= code <= 0x9fff or    # CJK Unified Ideographs
+        0x3400 <= code <= 0x4dbf or    # CJK Extension A
+        0x3000 <= code <= 0x303f or    # CJK Symbols and Punctuation
+        0xff00 <= code <= 0xffef or    # Fullwidth Forms
+        0x3040 <= code <= 0x309f or    # Hiragana
+        0x30a0 <= code <= 0x30ff       # Katakana
+    )
+
+
+def contains_cjk(text: str) -> bool:
+    """检测文本是否包含中日韩字符"""
+    return any(is_cjk_char(c) for c in text)
+
+
+def split_text_by_script(text: str) -> list:
+    """将文本按中英文分段，返回 [(text, is_cjk), ...]"""
+    if not text:
+        return []
+    
+    segments = []
+    current_segment = ""
+    current_is_cjk = None
+    
+    for char in text:
+        char_is_cjk = is_cjk_char(char)
+        
+        if current_is_cjk is None:
+            current_is_cjk = char_is_cjk
+            current_segment = char
+        elif char_is_cjk == current_is_cjk:
+            current_segment += char
+        else:
+            if current_segment:
+                segments.append((current_segment, current_is_cjk))
+            current_segment = char
+            current_is_cjk = char_is_cjk
+    
+    if current_segment:
+        segments.append((current_segment, current_is_cjk))
+    
+    return segments
+
+
+def insert_mixed_text(page, pos: tuple, text: str, fontsize: float, color: tuple) -> float:
+    """
+    插入中英文混合文本，返回文本结束的 x 坐标
+    中文用 china-ss 字体，英文用 helv 字体
+    """
+    x, y = pos
+    segments = split_text_by_script(text)
+    
+    for idx, (segment_text, is_cjk) in enumerate(segments):
+        fontname = "china-ss" if is_cjk else "helv"
+        page.insert_text((x, y), segment_text, fontsize=fontsize, fontname=fontname, color=color)
+        
+        # 计算这段文字的宽度，移动 x 坐标
+        # 中文字符宽度约等于字号，英文约为字号的 0.52
+        if is_cjk:
+            x += len(segment_text) * fontsize * 1.0
+        else:
+            x += len(segment_text) * fontsize * 0.52
+        
+        # 中英文切换时添加小间距
+        if idx < len(segments) - 1:
+            next_is_cjk = segments[idx + 1][1]
+            if is_cjk != next_is_cjk:
+                x += fontsize * 0.1  # 切换时加一点间距
+    
+    return x
+
+
+# ================== 数据结构 ==================
+
 @dataclass
 class AnnotationInfo:
-    """Annotation information"""
+    """批注信息"""
     number: int
     annot_type: str
     content: str
@@ -37,7 +119,7 @@ class AnnotationInfo:
 
 
 def get_type_label(annot_type: str) -> str:
-    """Get annotation type label"""
+    """获取批注类型标签"""
     type_labels = {
         "Text": "Note",
         "FreeText": "Text Box",
@@ -59,7 +141,7 @@ def get_type_label(annot_type: str) -> str:
 
 
 def get_type_color(annot_type: str) -> Tuple[float, float, float]:
-    """Get annotation type color"""
+    """获取批注类型颜色"""
     type_colors = {
         "Text": (0.85, 0.45, 0.1),
         "FreeText": (0.25, 0.65, 0.35),
@@ -75,9 +157,13 @@ def get_type_color(annot_type: str) -> Tuple[float, float, float]:
     return type_colors.get(annot_type, (0.5, 0.5, 0.5))
 
 
-def wrap_text(text: str, max_width: float, fontsize: float) -> List[str]:
-    """Wrap text by width"""
-    char_width = fontsize * 0.5
+def wrap_text(text: str, max_width: float, fontsize: float, has_cjk: bool = False) -> List[str]:
+    """将文本按宽度换行"""
+    # 中文字符宽度约等于字号，英文约为 0.52
+    if has_cjk:
+        char_width = fontsize * 1.0
+    else:
+        char_width = fontsize * 0.52
     chars_per_line = int(max_width / char_width)
     
     lines = []
@@ -88,20 +174,83 @@ def wrap_text(text: str, max_width: float, fontsize: float) -> List[str]:
             lines.append("")
             continue
         
-        words = para.split(' ')
-        current_line = ""
+        if has_cjk:
+            current_line = ""
+            for char in para:
+                if len(current_line) >= chars_per_line:
+                    lines.append(current_line)
+                    current_line = char
+                else:
+                    current_line += char
+            if current_line:
+                lines.append(current_line)
+        else:
+            words = para.split(' ')
+            current_line = ""
+            
+            for word in words:
+                test_line = current_line + (" " if current_line else "") + word
+                if len(test_line) <= chars_per_line:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    while len(word) > chars_per_line:
+                        lines.append(word[:chars_per_line])
+                        word = word[chars_per_line:]
+                    current_line = word
+            
+            if current_line:
+                lines.append(current_line)
+    
+    return lines
+
+
+def calc_text_width(text: str, fontsize: float) -> float:
+    """计算混合文本的实际宽度"""
+    width = 0
+    for char in text:
+        if is_cjk_char(char):
+            width += fontsize * 1.0
+        else:
+            width += fontsize * 0.52
+    return width
+
+
+def wrap_text_mixed(text: str, max_width: float, fontsize: float) -> List[str]:
+    """将中英文混合文本按宽度换行"""
+    lines = []
+    paragraphs = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    
+    for para in paragraphs:
+        if not para:
+            lines.append("")
+            continue
         
-        for word in words:
-            test_line = current_line + (" " if current_line else "") + word
-            if len(test_line) <= chars_per_line:
-                current_line = test_line
+        current_line = ""
+        current_width = 0
+        
+        i = 0
+        while i < len(para):
+            char = para[i]
+            
+            # 计算这个字符的宽度 (中文=1.0, 英文=0.52)
+            if is_cjk_char(char):
+                char_width = fontsize * 1.0
             else:
+                char_width = fontsize * 0.52
+            
+            # 检查是否需要换行
+            if current_width + char_width > max_width:
                 if current_line:
                     lines.append(current_line)
-                while len(word) > chars_per_line:
-                    lines.append(word[:chars_per_line])
-                    word = word[chars_per_line:]
-                current_line = word
+                current_line = char
+                current_width = char_width
+            else:
+                current_line += char
+                current_width += char_width
+            
+            i += 1
         
         if current_line:
             lines.append(current_line)
@@ -110,7 +259,7 @@ def wrap_text(text: str, max_width: float, fontsize: float) -> List[str]:
 
 
 def render_annotation_mark(page, annot, number: int):
-    """Render annotation mark on page"""
+    """在页面上渲染批注标记"""
     annot_type = annot.type[1]
     rect = annot.rect
     colors = annot.colors
@@ -212,7 +361,7 @@ def render_annotation_mark(page, annot, number: int):
 
 
 def add_number_marker(page, x: float, y: float, number: int, size: int = 10):
-    """Add number marker"""
+    """添加编号标记"""
     page_rect = page.rect
     x = min(max(x, 8), page_rect.width - 12)
     y = min(max(y, 8), page_rect.height - 12)
@@ -231,15 +380,19 @@ def add_number_marker(page, x: float, y: float, number: int, size: int = 10):
 
 
 def estimate_entry_height(info: AnnotationInfo, width: float) -> float:
-    """Estimate annotation entry height"""
+    """估算批注条目需要的高度"""
     height = 30
     
     if info.text_snippet:
-        lines = len(info.text_snippet) / (width / 5.5) + 1
+        has_cjk = contains_cjk(info.text_snippet)
+        char_factor = 1.0 if has_cjk else 0.52
+        lines = len(info.text_snippet) / (width / (8.5 * char_factor)) + 1
         height += min(lines * 11 + 12, 75)
     
     if info.content:
-        lines = len(info.content) / (width / 5.5) + info.content.count('\n') + info.content.count('\r') + 1
+        has_cjk = contains_cjk(info.content)
+        char_factor = 1.0 if has_cjk else 0.52
+        lines = len(info.content) / (width / (9.5 * char_factor)) + info.content.count('\n') + info.content.count('\r') + 1
         height += min(lines * 12 + 14, 200)
     else:
         height += 25
@@ -248,22 +401,22 @@ def estimate_entry_height(info: AnnotationInfo, width: float) -> float:
 
 
 def render_annotation_entry(page, info: AnnotationInfo, x: float, y: float, width: float) -> float:
-    """Render single annotation entry"""
+    """渲染单个批注条目"""
     
-    # Number circle
+    # 编号圆圈
     circle_radius = 9
     shape = page.new_shape()
     shape.draw_circle(fitz.Point(x + circle_radius, y + circle_radius), circle_radius)
     shape.finish(color=(0.7, 0.1, 0.1), fill=(0.9, 0.25, 0.25), width=0.5)
     shape.commit()
     
-    # Number
+    # 编号
     num_str = str(info.number)
     num_x = x + circle_radius - len(num_str) * 2.5
     num_y = y + circle_radius + 3.5
     page.insert_text((num_x, num_y), num_str, fontsize=10, fontname="helv", color=(1, 1, 1))
     
-    # Type label
+    # 类型标签
     type_x = x + circle_radius * 2 + 8
     type_label = get_type_label(info.annot_type)
     type_color = get_type_color(info.annot_type)
@@ -282,13 +435,15 @@ def render_annotation_entry(page, info: AnnotationInfo, x: float, y: float, widt
     content_x = x + circle_radius * 2 + 8
     current_y = y + 24
     
-    # Quoted text
+    # 被标注的原文 - 混合字体渲染
     if info.text_snippet:
         snippet_text = info.text_snippet[:250]
         if len(info.text_snippet) > 250:
             snippet_text += "..."
         
-        snippet_lines = wrap_text(f'"{snippet_text}"', width - 25, 8.5)
+        has_cjk = contains_cjk(snippet_text)
+        
+        snippet_lines = wrap_text_mixed(f'"{snippet_text}"', width - 25, 8.5)
         snippet_height = len(snippet_lines) * 11 + 8
         snippet_height = min(snippet_height, 70)
         
@@ -306,16 +461,18 @@ def render_annotation_entry(page, info: AnnotationInfo, x: float, y: float, widt
         text_y = current_y + 10
         max_lines = int((snippet_height - 8) / 11)
         for i, line in enumerate(snippet_lines[:max_lines]):
-            page.insert_text((content_x + 6, text_y), line, fontsize=8.5, fontname="helv", color=(0.35, 0.35, 0.35))
+            insert_mixed_text(page, (content_x + 6, text_y), line, 8.5, (0.35, 0.35, 0.35))
             text_y += 11
         
         current_y += snippet_height + 6
     
-    # Comment content
+    # 评论内容 - 混合字体渲染
     if info.content:
         content_text = info.content.strip()
         
-        content_lines = wrap_text(content_text, width - 25, 9.5)
+        has_cjk = contains_cjk(content_text)
+        
+        content_lines = wrap_text_mixed(content_text, width - 25, 9.5)
         content_height = len(content_lines) * 12 + 12
         content_height = min(content_height, 180)
         
@@ -333,7 +490,7 @@ def render_annotation_entry(page, info: AnnotationInfo, x: float, y: float, widt
         text_y = current_y + 12
         max_lines = int((content_height - 10) / 12)
         for i, line in enumerate(content_lines[:max_lines]):
-            page.insert_text((content_x + 8, text_y), line, fontsize=9.5, fontname="helv", color=(0.15, 0.15, 0.25))
+            insert_mixed_text(page, (content_x + 8, text_y), line, 9.5, (0.15, 0.15, 0.25))
             text_y += 12
         
         current_y += content_height + 6
@@ -347,7 +504,7 @@ def render_annotation_entry(page, info: AnnotationInfo, x: float, y: float, widt
         page.insert_text((content_x + 8, current_y + 13), "(no comment)", fontsize=8.5, fontname="helv", color=(0.5, 0.5, 0.5))
         current_y += 22
     
-    # Bottom separator
+    # 底部分隔线
     shape = page.new_shape()
     shape.draw_line((x, current_y), (x + width, current_y))
     shape.finish(color=(0.88, 0.88, 0.88), width=0.3)
@@ -357,7 +514,7 @@ def render_annotation_entry(page, info: AnnotationInfo, x: float, y: float, widt
 
 
 def create_summary_page(doc, annotations: List[AnnotationInfo], page_num: int, page_rect: fitz.Rect):
-    """Create annotation summary page"""
+    """创建批注汇总页"""
     summary_page = doc.new_page(width=page_rect.width, height=page_rect.height)
     
     margin_left = 45
@@ -368,13 +525,13 @@ def create_summary_page(doc, annotations: List[AnnotationInfo], page_num: int, p
     content_width = page_rect.width - margin_left - margin_right
     current_y = margin_top
     
-    # Title background
+    # 标题背景
     shape = summary_page.new_shape()
     shape.draw_rect(fitz.Rect(0, 0, page_rect.width, current_y + 35))
     shape.finish(color=None, fill=(0.25, 0.35, 0.55))
     shape.commit()
     
-    # Title
+    # 标题
     title = f"Page {page_num} - Comments Summary ({len(annotations)} items)"
     title_width = len(title) * 7
     title_x = (page_rect.width - title_width) / 2
@@ -382,7 +539,7 @@ def create_summary_page(doc, annotations: List[AnnotationInfo], page_num: int, p
     
     current_y += 45
     
-    # Separator
+    # 分隔线
     shape = summary_page.new_shape()
     shape.draw_line((margin_left, current_y), (page_rect.width - margin_right, current_y))
     shape.finish(color=(0.8, 0.8, 0.8), width=0.5)
@@ -390,7 +547,7 @@ def create_summary_page(doc, annotations: List[AnnotationInfo], page_num: int, p
     
     current_y += 12
     
-    # Render each annotation
+    # 渲染每个批注
     for info in annotations:
         needed_height = estimate_entry_height(info, content_width)
         
@@ -413,23 +570,13 @@ def create_summary_page(doc, annotations: List[AnnotationInfo], page_num: int, p
 
 
 def flatten_pdf_with_summary(input_path: str, output_path: str = None, verbose: bool = True) -> str:
-    """
-    Flatten PDF annotations with summary pages
-    
-    Args:
-        input_path: Input PDF file path
-        output_path: Output PDF file path (optional)
-        verbose: Print progress information
-    
-    Returns:
-        Output file path
-    """
+    """将 PDF 批注固化，采用编号+汇总页的方式"""
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"File not found: {input_path}")
     
     if output_path is None:
         path = Path(input_path)
-        output_path = str(path.parent / f"{path.stem}_commented{path.suffix}")
+        output_path = str(path.parent / f"{path.stem}_flattened{path.suffix}")
     
     src_doc = fitz.open(input_path)
     new_doc = fitz.open()
@@ -527,24 +674,17 @@ Examples:
   python flatten_pdf.py paper.pdf -o output.pdf
   python flatten_pdf.py paper.pdf -q
 
-Supported annotation types:
-  - Note (sticky notes)
-  - Highlight
-  - Strikeout
-  - Underline
-  - Insert (caret)
-  - Rectangle
-  - Ellipse
-  - Line
-  - Drawing (ink)
-  - Text Box (free text)
+Features:
+  - Supports Chinese/CJK content (中文支持)
+  - Shows type labels and quoted text properly
+  - Generates summary pages with all annotations
         """
     )
     
     parser.add_argument("input", help="Input PDF file path")
     parser.add_argument("output", nargs="?", help="Output PDF file path (optional)")
     parser.add_argument("-o", "--output-file", dest="output_file", help="Output PDF file path")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Quiet mode (no output)")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Quiet mode")
     
     args = parser.parse_args()
     output_path = args.output_file or args.output
