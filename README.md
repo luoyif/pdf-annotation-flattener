@@ -1,86 +1,178 @@
-# PDF 批注固化工具 (PDF Annotation Flattener)
+# PDF Annotation Flattener
 
-将 PDF 中的批注（高亮、便签、删除线等）固化到页面上，方便分享和打印。
+📄 将 PDF 中的批注（高亮、便签、删除线等）固化到页面上，并生成汇总页，方便分享和打印。
 
-## 功能特点
+Flatten PDF annotations (highlights, notes, strikeouts, etc.) onto pages and generate summary pages for easy sharing.
 
-- ✅ 支持多种批注类型：高亮、删除线、下划线、便签、插入符号、矩形框等
-- ✅ 在原文上保留视觉标记 + 红色编号
-- ✅ 自动生成批注汇总页
-- ✅ 完全在浏览器中使用，无需安装软件
-- ✅ 文件不存储，保护隐私
+## ✨ Features
 
-## 在线使用
+- ✅ Supports multiple annotation types: highlights, strikeouts, underlines, sticky notes, caret, rectangles, etc.
+- ✅ Preserves visual marks on original pages with numbered markers
+- ✅ Auto-generates summary pages after each annotated page
+- ✅ Works with PDFs from Adobe Acrobat, Mac Preview, and other PDF editors
+- ✅ Privacy-friendly: files are processed in memory and not stored
 
-访问：[你的 Streamlit Cloud URL]
+## 🚀 Usage
 
-## 本地运行
+### Option 1: Web App (Online)
 
-### 1. 安装依赖
+Visit the online app: **[Your Streamlit App URL]**
+
+Simply upload your PDF and download the processed file.
+
+### Option 2: Command Line (Local)
+
+For batch processing or offline use.
+
+#### Installation
 
 ```bash
+pip install pymupdf
+```
+
+#### Basic Usage
+
+```bash
+# Process a PDF (output: input_commented.pdf)
+python flatten_pdf.py paper.pdf
+
+# Specify output filename
+python flatten_pdf.py paper.pdf output.pdf
+
+# Or use -o flag
+python flatten_pdf.py paper.pdf -o output.pdf
+
+# Quiet mode (no console output)
+python flatten_pdf.py paper.pdf -q
+```
+
+#### Examples
+
+```bash
+# Process a research paper
+python flatten_pdf.py research_paper.pdf
+
+# Process with custom output name
+python flatten_pdf.py draft.pdf final_with_comments.pdf
+
+# Batch process multiple files
+for f in *.pdf; do python flatten_pdf.py "$f"; done
+```
+
+### Option 3: Run Web App Locally
+
+```bash
+# Install dependencies
 pip install -r requirements.txt
+
+# Run the app
+streamlit run app.py
+
+# Open browser at http://localhost:8501
 ```
 
-### 2. 运行应用
+## 📋 Supported Annotation Types
+
+| Type | Icon | Description |
+|------|------|-------------|
+| Note | 📝 | Sticky notes / comments |
+| Highlight | 🟡 | Highlighted text |
+| Strikeout | ~~text~~ | Strikethrough text |
+| Underline | <u>text</u> | Underlined text |
+| Insert | ▲ | Caret / insertion point |
+| Rectangle | □ | Rectangle markup |
+| Ellipse | ○ | Circle / ellipse markup |
+| Line | / | Line markup |
+| Drawing | ✏️ | Freehand ink annotations |
+| Text Box | 📄 | Free text annotations |
+
+## 📁 Project Structure
+
+```
+pdf-annotation-flattener/
+├── app.py              # Streamlit web application
+├── flatten_pdf.py      # Command line tool
+├── requirements.txt    # Python dependencies
+└── README.md          # This file
+```
+
+## 🖼️ Output Format
+
+### Original Page
+- Visual marks (highlights, strikeouts, etc.) are preserved
+- Red numbered circles are added next to each annotation
+
+### Summary Page (auto-generated after each annotated page)
+- **Number**: Corresponds to the marker on the original page
+- **Type**: Annotation type (Highlight, Note, Strikeout, etc.)
+- **Quoted Text**: The text that was annotated (gray background)
+- **Comment**: The reviewer's comment (blue background)
+
+Example:
+```
+┌─────────────────────────────────────┐
+│  Page 1 - Comments Summary (5 items) │
+├─────────────────────────────────────┤
+│ ① [Highlight]                        │
+│   "original text that was highlighted"│
+│   This needs to be revised...        │
+├─────────────────────────────────────┤
+│ ② [Strikeout]                        │
+│   "text that was struck out"         │
+│   (no comment)                       │
+└─────────────────────────────────────┘
+```
+
+## 🔧 Requirements
+
+- Python 3.8+
+- PyMuPDF (fitz) >= 1.23.0
+- Streamlit >= 1.28.0 (for web app only)
+
+## 📦 Installation for Development
 
 ```bash
-streamlit run app.py
+# Clone the repository
+git clone https://github.com/yourusername/pdf-annotation-flattener.git
+cd pdf-annotation-flattener
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run tests
+python flatten_pdf.py test.pdf
 ```
 
-### 3. 打开浏览器
+## 🌐 Deploy Your Own Instance
 
-访问 http://localhost:8501
+### Deploy to Streamlit Cloud (Free)
 
-## 部署到 Streamlit Cloud（免费）
+1. Fork this repository
+2. Go to [share.streamlit.io](https://share.streamlit.io)
+3. Sign in with GitHub
+4. Click "New app" and select your forked repo
+5. Set `app.py` as the main file
+6. Click "Deploy"
 
-### 步骤 1: 准备 GitHub 仓库
+Your app will be live in ~2 minutes!
 
-1. 在 GitHub 创建新仓库
-2. 上传以下文件：
-   - `app.py`
-   - `requirements.txt`
-   - `README.md`（可选）
+## 🔒 Privacy
 
-### 步骤 2: 部署到 Streamlit Cloud
+- **Web App**: Files are processed in server memory and immediately discarded after processing. No files are stored.
+- **Command Line**: All processing happens locally on your machine.
 
-1. 访问 [share.streamlit.io](https://share.streamlit.io)
-2. 使用 GitHub 账号登录
-3. 点击 "New app"
-4. 选择你的仓库和 `app.py` 文件
-5. 点击 "Deploy"
-
-等待几分钟，你的应用就会上线！
-
-## 项目结构
-
-```
-streamlit-app/
-├── app.py              # 主应用代码
-├── requirements.txt    # Python 依赖
-└── README.md          # 说明文档
-```
-
-## 技术栈
-
-- **Streamlit**: Web 界面框架
-- **PyMuPDF (fitz)**: PDF 处理库
-
-## 支持的批注类型
-
-| 类型 | 英文名 | 支持 |
-|------|--------|------|
-| 便签 | Note/Text | ✅ |
-| 高亮 | Highlight | ✅ |
-| 删除线 | Strikeout | ✅ |
-| 下划线 | Underline | ✅ |
-| 插入 | Caret | ✅ |
-| 矩形框 | Rectangle | ✅ |
-| 椭圆 | Ellipse | ✅ |
-| 手绘 | Ink | ✅ |
-| 线条 | Line | ✅ |
-| 文本框 | FreeText | ✅ |
-
-## License
+## 📄 License
 
 MIT License
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## 📮 Feedback
+
+If you encounter any issues or have suggestions, please open an issue on GitHub.
+
+---
+
+Made with ❤️ using [PyMuPDF](https://pymupdf.readthedocs.io/) and [Streamlit](https://streamlit.io/)
