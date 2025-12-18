@@ -6,10 +6,12 @@ Flatten PDF annotations onto pages with summary
 Supports Chinese/CJK content / 支持中文批注
 
 Usage:
-    python flatten_pdf.py input.pdf
-    python flatten_pdf.py input.pdf output.pdf
+    python flatten_pdf.py input.pdf                    # Output: input_flattened.pdf
+    python flatten_pdf.py input.pdf output.pdf         # Custom output name
     python flatten_pdf.py input.pdf -o output.pdf
-    python flatten_pdf.py input.pdf -q  # quiet mode
+    python flatten_pdf.py input.pdf -q                 # Quiet mode
+    python flatten_pdf.py input.pdf --json             # Export as JSON only
+    python flatten_pdf.py input.pdf --json -o out.json
 
 Requirements:
     pip install pymupdf
@@ -19,9 +21,11 @@ import fitz  # PyMuPDF
 import sys
 import os
 import re
+import json
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Tuple
+from datetime import datetime
 
 
 # ================== 中文支持 & 混合字体渲染 ==================
@@ -116,6 +120,22 @@ class AnnotationInfo:
     color: Tuple[float, float, float]
     text_snippet: str = ""
     author: str = ""
+    
+    def to_dict(self) -> dict:
+        """转换为可 JSON 序列化的字典"""
+        return {
+            "number": self.number,
+            "type": get_type_label(self.annot_type),
+            "quoted_text": self.text_snippet if self.text_snippet else None,
+            "comment": self.content if self.content else None,
+            "author": self.author if self.author else None,
+            "position": {
+                "x0": round(self.rect.x0, 2),
+                "y0": round(self.rect.y0, 2),
+                "x1": round(self.rect.x1, 2),
+                "y1": round(self.rect.y1, 2)
+            }
+        }
 
 
 def get_type_label(annot_type: str) -> str:
@@ -661,6 +681,106 @@ def flatten_pdf_with_summary(input_path: str, output_path: str = None, verbose: 
     return output_path
 
 
+def extract_annotations_json(input_path: str, output_path: str = None, verbose: bool = True) -> str:
+    """提取 PDF 批注并导出为 JSON 格式"""
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"File not found: {input_path}")
+    
+    if output_path is None:
+        path = Path(input_path)
+        output_path = str(path.parent / f"{path.stem}_annotations.json")
+    
+    src_doc = fitz.open(input_path)
+    
+    result = {
+        "filename": os.path.basename(input_path),
+        "exported_at": datetime.now().isoformat(),
+        "total_pages": len(src_doc),
+        "annotated_pages": 0,
+        "total_annotations": 0,
+        "pages": []
+    }
+    
+    if verbose:
+        print(f"Extracting annotations from: {input_path}")
+        print(f"Total pages: {len(src_doc)}")
+        print("-" * 50)
+    
+    for page_num in range(len(src_doc)):
+        src_page = src_doc[page_num]
+        annots = list(src_page.annots()) if src_page.annots() else []
+        
+        if not annots:
+            continue
+        
+        result["annotated_pages"] += 1
+        
+        page_data = {
+            "page": page_num + 1,
+            "annotation_count": len(annots),
+            "annotations": []
+        }
+        
+        for idx, annot in enumerate(annots, 1):
+            annot_type = annot.type[1]
+            content = annot.info.get("content", "").strip()
+            author = annot.info.get("title", "")
+            rect = annot.rect
+            colors = annot.colors
+            stroke_color = colors.get("stroke", (1, 0, 0))
+            fill_color = colors.get("fill", (1, 1, 0))
+            
+            text_snippet = ""
+            try:
+                if annot.vertices and len(annot.vertices) >= 4:
+                    all_points = annot.vertices
+                    min_x = min(p[0] for p in all_points)
+                    min_y = min(p[1] for p in all_points)
+                    max_x = max(p[0] for p in all_points)
+                    max_y = max(p[1] for p in all_points)
+                    clip_rect = fitz.Rect(min_x, min_y, max_x, max_y)
+                    text_snippet = src_page.get_text("text", clip=clip_rect).strip()
+                elif rect.is_valid and not rect.is_empty:
+                    text_snippet = src_page.get_text("text", clip=rect).strip()
+            except:
+                pass
+            
+            if text_snippet:
+                text_snippet = " ".join(text_snippet.split())[:300]
+            
+            info = AnnotationInfo(
+                number=idx,
+                annot_type=annot_type,
+                content=content,
+                page_num=page_num + 1,
+                rect=rect,
+                color=stroke_color if stroke_color else fill_color,
+                text_snippet=text_snippet,
+                author=author
+            )
+            
+            page_data["annotations"].append(info.to_dict())
+        
+        result["pages"].append(page_data)
+        result["total_annotations"] += len(annots)
+        
+        if verbose:
+            print(f"Page {page_num + 1:3d}: {len(annots)} annotations extracted")
+    
+    src_doc.close()
+    
+    # 写入 JSON 文件
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+    
+    if verbose:
+        print("-" * 50)
+        print(f"✅ Done! Extracted {result['total_annotations']} annotations")
+        print(f"📄 Saved to: {output_path}")
+    
+    return output_path
+
+
 def main():
     import argparse
     
@@ -669,28 +789,37 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python flatten_pdf.py paper.pdf
-  python flatten_pdf.py paper.pdf output.pdf
+  python flatten_pdf.py paper.pdf                    # Output: paper_flattened.pdf
+  python flatten_pdf.py paper.pdf output.pdf         # Custom output name
   python flatten_pdf.py paper.pdf -o output.pdf
-  python flatten_pdf.py paper.pdf -q
+  python flatten_pdf.py paper.pdf -q                 # Quiet mode
+  python flatten_pdf.py paper.pdf --json             # Export as JSON only
+  python flatten_pdf.py paper.pdf --json -o out.json
 
 Features:
   - Supports Chinese/CJK content (中文支持)
   - Shows type labels and quoted text properly
   - Generates summary pages with all annotations
+  - JSON export mode for data extraction
         """
     )
     
     parser.add_argument("input", help="Input PDF file path")
-    parser.add_argument("output", nargs="?", help="Output PDF file path (optional)")
-    parser.add_argument("-o", "--output-file", dest="output_file", help="Output PDF file path")
+    parser.add_argument("output", nargs="?", help="Output file path (optional)")
+    parser.add_argument("-o", "--output-file", dest="output_file", help="Output file path")
     parser.add_argument("-q", "--quiet", action="store_true", help="Quiet mode")
+    parser.add_argument("--json", action="store_true", help="Export annotations as JSON only (no PDF generation)")
     
     args = parser.parse_args()
     output_path = args.output_file or args.output
     
     try:
-        flatten_pdf_with_summary(args.input, output_path, verbose=not args.quiet)
+        if args.json:
+            # JSON 导出模式
+            extract_annotations_json(args.input, output_path, verbose=not args.quiet)
+        else:
+            # PDF 固化模式
+            flatten_pdf_with_summary(args.input, output_path, verbose=not args.quiet)
         return 0
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)

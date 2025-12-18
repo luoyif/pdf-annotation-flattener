@@ -14,8 +14,10 @@ PDF Annotation Flattener - Streamlit Web App
 import streamlit as st
 import fitz  # PyMuPDF
 import re
-from dataclasses import dataclass
-from typing import List, Tuple
+import json
+from dataclasses import dataclass, asdict
+from typing import List, Tuple, Optional
+from datetime import datetime
 
 # 页面配置
 st.set_page_config(
@@ -151,6 +153,22 @@ class AnnotationInfo:
     color: Tuple[float, float, float]
     text_snippet: str = ""
     author: str = ""
+    
+    def to_dict(self) -> dict:
+        """转换为可 JSON 序列化的字典"""
+        return {
+            "number": self.number,
+            "type": get_type_label(self.annot_type),
+            "quoted_text": self.text_snippet if self.text_snippet else None,
+            "comment": self.content if self.content else None,
+            "author": self.author if self.author else None,
+            "position": {
+                "x0": round(self.rect.x0, 2),
+                "y0": round(self.rect.y0, 2),
+                "x1": round(self.rect.x1, 2),
+                "y1": round(self.rect.y1, 2)
+            }
+        }
 
 
 def get_type_label(annot_type: str) -> str:
@@ -699,6 +717,99 @@ def process_pdf(pdf_bytes: bytes, progress_callback=None) -> Tuple[bytes, dict]:
     return output_bytes, stats
 
 
+def extract_annotations_json(pdf_bytes: bytes, filename: str = "document.pdf") -> Tuple[str, dict]:
+    """
+    提取 PDF 批注并导出为 JSON 格式
+    返回 (json_string, stats_dict)
+    """
+    src_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    
+    result = {
+        "filename": filename,
+        "exported_at": datetime.now().isoformat(),
+        "total_pages": len(src_doc),
+        "annotated_pages": 0,
+        "total_annotations": 0,
+        "pages": []
+    }
+    
+    stats = {
+        "total_pages": len(src_doc),
+        "annotated_pages": 0,
+        "total_annotations": 0,
+        "annotation_types": {}
+    }
+    
+    for page_num in range(len(src_doc)):
+        src_page = src_doc[page_num]
+        annots = list(src_page.annots()) if src_page.annots() else []
+        
+        if not annots:
+            continue
+        
+        stats["annotated_pages"] += 1
+        result["annotated_pages"] += 1
+        
+        page_data = {
+            "page": page_num + 1,
+            "annotation_count": len(annots),
+            "annotations": []
+        }
+        
+        for idx, annot in enumerate(annots, 1):
+            annot_type = annot.type[1]
+            content = annot.info.get("content", "").strip()
+            author = annot.info.get("title", "")
+            rect = annot.rect
+            colors = annot.colors
+            stroke_color = colors.get("stroke", (1, 0, 0))
+            fill_color = colors.get("fill", (1, 1, 0))
+            
+            # 统计批注类型
+            type_label = get_type_label(annot_type)
+            stats["annotation_types"][type_label] = stats["annotation_types"].get(type_label, 0) + 1
+            
+            text_snippet = ""
+            try:
+                if annot.vertices and len(annot.vertices) >= 4:
+                    all_points = annot.vertices
+                    min_x = min(p[0] for p in all_points)
+                    min_y = min(p[1] for p in all_points)
+                    max_x = max(p[0] for p in all_points)
+                    max_y = max(p[1] for p in all_points)
+                    clip_rect = fitz.Rect(min_x, min_y, max_x, max_y)
+                    text_snippet = src_page.get_text("text", clip=clip_rect).strip()
+                elif rect.is_valid and not rect.is_empty:
+                    text_snippet = src_page.get_text("text", clip=rect).strip()
+            except:
+                pass
+            
+            if text_snippet:
+                text_snippet = " ".join(text_snippet.split())[:300]
+            
+            info = AnnotationInfo(
+                number=idx,
+                annot_type=annot_type,
+                content=content,
+                page_num=page_num + 1,
+                rect=rect,
+                color=stroke_color if stroke_color else fill_color,
+                text_snippet=text_snippet,
+                author=author
+            )
+            
+            page_data["annotations"].append(info.to_dict())
+        
+        result["pages"].append(page_data)
+        stats["total_annotations"] += len(annots)
+        result["total_annotations"] += len(annots)
+    
+    src_doc.close()
+    
+    json_str = json.dumps(result, ensure_ascii=False, indent=2)
+    return json_str, stats
+
+
 # ================== Streamlit UI ==================
 
 def main():
@@ -722,58 +833,124 @@ def main():
         
         st.markdown("")
         
-        if st.button("🚀 Process / 开始处理", type="primary", use_container_width=True):
+        # 输出格式选择
+        output_format = st.radio(
+            "Output Format / 输出格式",
+            options=["pdf", "json"],
+            format_func=lambda x: "📄 PDF with Summary Pages / PDF + 汇总页" if x == "pdf" else "📋 JSON Only / 仅导出 JSON",
+            horizontal=True
+        )
+        
+        st.markdown("")
+        
+        button_label = "🚀 Process / 开始处理" if output_format == "pdf" else "🚀 Export JSON / 导出 JSON"
+        
+        if st.button(button_label, type="primary", use_container_width=True):
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            def update_progress(progress):
-                progress_bar.progress(progress)
-                status_text.text(f"Processing... {int(progress * 100)}%")
-            
             try:
-                status_text.text("Processing...")
                 pdf_bytes = uploaded_file.getvalue()
-                output_bytes, stats = process_pdf(pdf_bytes, update_progress)
                 
-                progress_bar.progress(1.0)
-                status_text.text("Done! ✅")
+                if output_format == "pdf":
+                    # PDF 模式
+                    def update_progress(progress):
+                        progress_bar.progress(progress)
+                        status_text.text(f"Processing... {int(progress * 100)}%")
+                    
+                    status_text.text("Processing...")
+                    output_bytes, stats = process_pdf(pdf_bytes, update_progress)
+                    
+                    progress_bar.progress(1.0)
+                    status_text.text("Done! ✅")
+                    
+                    st.markdown("---")
+                    st.subheader("📊 Results / 处理结果")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total Pages / 总页数", stats["total_pages"])
+                    with col2:
+                        st.metric("Annotated Pages / 有批注页数", stats["annotated_pages"])
+                    with col3:
+                        st.metric("Total Annotations / 总批注数", stats["total_annotations"])
+                    
+                    if stats["annotation_types"]:
+                        st.markdown("**Annotation Types / 批注类型:**")
+                        type_cols = st.columns(min(len(stats["annotation_types"]), 4))
+                        for i, (type_name, count) in enumerate(stats["annotation_types"].items()):
+                            with type_cols[i % len(type_cols)]:
+                                st.markdown(f"- {type_name}: **{count}**")
+                    
+                    st.markdown("---")
+                    
+                    output_filename = uploaded_file.name.replace(".pdf", "_flattened.pdf")
+                    
+                    st.download_button(
+                        label="📥 Download PDF / 下载 PDF",
+                        data=output_bytes,
+                        file_name=output_filename,
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                    
+                    st.markdown("""
+                    <div class="success-box">
+                        ✅ <strong>Done!</strong> Annotations have been flattened with summary pages added.<br>
+                        ✅ <strong>完成！</strong> 批注已固化到页面上，并添加了汇总页。
+                    </div>
+                    """, unsafe_allow_html=True)
                 
-                st.markdown("---")
-                st.subheader("📊 Results / 处理结果")
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total Pages / 总页数", stats["total_pages"])
-                with col2:
-                    st.metric("Annotated Pages / 有批注页数", stats["annotated_pages"])
-                with col3:
-                    st.metric("Total Annotations / 总批注数", stats["total_annotations"])
-                
-                if stats["annotation_types"]:
-                    st.markdown("**Annotation Types / 批注类型:**")
-                    type_cols = st.columns(min(len(stats["annotation_types"]), 4))
-                    for i, (type_name, count) in enumerate(stats["annotation_types"].items()):
-                        with type_cols[i % len(type_cols)]:
-                            st.markdown(f"- {type_name}: **{count}**")
-                
-                st.markdown("---")
-                
-                output_filename = uploaded_file.name.replace(".pdf", "_flattened.pdf")
-                
-                st.download_button(
-                    label="📥 Download / 下载处理后的 PDF",
-                    data=output_bytes,
-                    file_name=output_filename,
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-                
-                st.markdown("""
-                <div class="success-box">
-                    ✅ <strong>Done!</strong> Annotations have been flattened with summary pages added.<br>
-                    ✅ <strong>完成！</strong> 批注已固化到页面上，并添加了汇总页。
-                </div>
-                """, unsafe_allow_html=True)
+                else:
+                    # JSON 模式
+                    status_text.text("Extracting annotations...")
+                    progress_bar.progress(0.5)
+                    
+                    json_str, stats = extract_annotations_json(pdf_bytes, uploaded_file.name)
+                    
+                    progress_bar.progress(1.0)
+                    status_text.text("Done! ✅")
+                    
+                    st.markdown("---")
+                    st.subheader("📊 Results / 处理结果")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total Pages / 总页数", stats["total_pages"])
+                    with col2:
+                        st.metric("Annotated Pages / 有批注页数", stats["annotated_pages"])
+                    with col3:
+                        st.metric("Total Annotations / 总批注数", stats["total_annotations"])
+                    
+                    if stats["annotation_types"]:
+                        st.markdown("**Annotation Types / 批注类型:**")
+                        type_cols = st.columns(min(len(stats["annotation_types"]), 4))
+                        for i, (type_name, count) in enumerate(stats["annotation_types"].items()):
+                            with type_cols[i % len(type_cols)]:
+                                st.markdown(f"- {type_name}: **{count}**")
+                    
+                    st.markdown("---")
+                    
+                    # 预览 JSON
+                    with st.expander("👁️ Preview JSON / 预览 JSON", expanded=False):
+                        st.code(json_str[:3000] + ("..." if len(json_str) > 3000 else ""), language="json")
+                    
+                    output_filename = uploaded_file.name.replace(".pdf", "_annotations.json")
+                    
+                    st.download_button(
+                        label="📥 Download JSON / 下载 JSON",
+                        data=json_str,
+                        file_name=output_filename,
+                        mime="application/json",
+                        use_container_width=True
+                    )
+                    
+                    st.markdown(f"""
+                    <div class="success-box">
+                        ✅ <strong>Done!</strong> Extracted {stats["total_annotations"]} annotations to JSON.<br>
+                        ✅ <strong>完成！</strong> 已提取 {stats["total_annotations"]} 条批注到 JSON。
+                    </div>
+                    """, unsafe_allow_html=True)
                 
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
