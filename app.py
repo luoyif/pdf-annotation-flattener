@@ -1,7 +1,8 @@
 """
-PDF 批注固化工具 - Streamlit Web App
-====================================
+PDF Annotation Flattener - Streamlit Web App
+=============================================
 将 PDF 中的批注固化到页面上，并生成汇总页
+支持中文批注内容
 
 部署到 Streamlit Cloud:
 1. 将代码推送到 GitHub
@@ -12,13 +13,13 @@ PDF 批注固化工具 - Streamlit Web App
 
 import streamlit as st
 import fitz  # PyMuPDF
-import io
+import re
 from dataclasses import dataclass
 from typing import List, Tuple
 
 # 页面配置
 st.set_page_config(
-    page_title="PDF 批注固化工具",
+    page_title="PDF Annotation Flattener",
     page_icon="📄",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -54,18 +55,33 @@ st.markdown("""
         border: 1px solid #b8daff;
         color: #004085;
     }
-    .stDownloadButton > button {
-        width: 100%;
-        background-color: #28a745;
-        color: white;
-    }
-    .stDownloadButton > button:hover {
-        background-color: #218838;
-        color: white;
-    }
 </style>
 """, unsafe_allow_html=True)
 
+
+# ================== 中文支持 ==================
+
+def contains_cjk(text: str) -> bool:
+    """检测文本是否包含中日韩字符"""
+    cjk_pattern = re.compile(
+        r'[\u4e00-\u9fff'  # CJK Unified Ideographs
+        r'\u3400-\u4dbf'   # CJK Unified Ideographs Extension A
+        r'\u3000-\u303f'   # CJK Symbols and Punctuation
+        r'\uff00-\uffef'   # Halfwidth and Fullwidth Forms
+        r'\u3040-\u309f'   # Hiragana
+        r'\u30a0-\u30ff]'  # Katakana
+    )
+    return bool(cjk_pattern.search(text))
+
+
+def get_font_for_text(text: str) -> str:
+    """根据文本内容选择合适的字体"""
+    if contains_cjk(text):
+        return "china-ss"  # PyMuPDF 内置中文字体
+    return "helv"  # Helvetica for English
+
+
+# ================== 数据结构 ==================
 
 @dataclass
 class AnnotationInfo:
@@ -119,9 +135,13 @@ def get_type_color(annot_type: str) -> Tuple[float, float, float]:
     return type_colors.get(annot_type, (0.5, 0.5, 0.5))
 
 
-def wrap_text(text: str, max_width: float, fontsize: float) -> List[str]:
+def wrap_text(text: str, max_width: float, fontsize: float, has_cjk: bool = False) -> List[str]:
     """将文本按宽度换行"""
-    char_width = fontsize * 0.5
+    # 中文字符宽度约为英文的1.5-2倍
+    if has_cjk:
+        char_width = fontsize * 0.9
+    else:
+        char_width = fontsize * 0.5
     chars_per_line = int(max_width / char_width)
     
     lines = []
@@ -132,23 +152,36 @@ def wrap_text(text: str, max_width: float, fontsize: float) -> List[str]:
             lines.append("")
             continue
         
-        words = para.split(' ')
-        current_line = ""
-        
-        for word in words:
-            test_line = current_line + (" " if current_line else "") + word
-            if len(test_line) <= chars_per_line:
-                current_line = test_line
-            else:
-                if current_line:
+        if has_cjk:
+            # 对于中文文本，按字符数换行
+            current_line = ""
+            for char in para:
+                if len(current_line) >= chars_per_line:
                     lines.append(current_line)
-                while len(word) > chars_per_line:
-                    lines.append(word[:chars_per_line])
-                    word = word[chars_per_line:]
-                current_line = word
-        
-        if current_line:
-            lines.append(current_line)
+                    current_line = char
+                else:
+                    current_line += char
+            if current_line:
+                lines.append(current_line)
+        else:
+            # 对于英文文本，按单词换行
+            words = para.split(' ')
+            current_line = ""
+            
+            for word in words:
+                test_line = current_line + (" " if current_line else "") + word
+                if len(test_line) <= chars_per_line:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    while len(word) > chars_per_line:
+                        lines.append(word[:chars_per_line])
+                        word = word[chars_per_line:]
+                    current_line = word
+            
+            if current_line:
+                lines.append(current_line)
     
     return lines
 
@@ -279,11 +312,15 @@ def estimate_entry_height(info: AnnotationInfo, width: float) -> float:
     height = 30
     
     if info.text_snippet:
-        lines = len(info.text_snippet) / (width / 5.5) + 1
+        has_cjk = contains_cjk(info.text_snippet)
+        char_factor = 0.9 if has_cjk else 0.5
+        lines = len(info.text_snippet) / (width / (8.5 * char_factor)) + 1
         height += min(lines * 11 + 12, 75)
     
     if info.content:
-        lines = len(info.content) / (width / 5.5) + info.content.count('\n') + info.content.count('\r') + 1
+        has_cjk = contains_cjk(info.content)
+        char_factor = 0.9 if has_cjk else 0.5
+        lines = len(info.content) / (width / (9.5 * char_factor)) + info.content.count('\n') + info.content.count('\r') + 1
         height += min(lines * 12 + 14, 200)
     else:
         height += 25
@@ -301,13 +338,13 @@ def render_annotation_entry(page, info: AnnotationInfo, x: float, y: float, widt
     shape.finish(color=(0.7, 0.1, 0.1), fill=(0.9, 0.25, 0.25), width=0.5)
     shape.commit()
     
-    # 编号
+    # 编号 - 数字用英文字体
     num_str = str(info.number)
     num_x = x + circle_radius - len(num_str) * 2.5
     num_y = y + circle_radius + 3.5
     page.insert_text((num_x, num_y), num_str, fontsize=10, fontname="helv", color=(1, 1, 1))
     
-    # 类型标签
+    # 类型标签 - 英文标签用英文字体
     type_x = x + circle_radius * 2 + 8
     type_label = get_type_label(info.annot_type)
     type_color = get_type_color(info.annot_type)
@@ -326,62 +363,75 @@ def render_annotation_entry(page, info: AnnotationInfo, x: float, y: float, widt
     content_x = x + circle_radius * 2 + 8
     current_y = y + 24
     
-    # 被标注的原文
+    # 被标注的原文 - 智能选择字体
     if info.text_snippet:
         snippet_text = info.text_snippet[:250]
         if len(info.text_snippet) > 250:
             snippet_text += "..."
         
-        snippet_lines = wrap_text(f'"{snippet_text}"', width - 25, 8.5)
+        has_cjk = contains_cjk(snippet_text)
+        fontname = "china-ss" if has_cjk else "helv"
+        
+        snippet_lines = wrap_text(f'"{snippet_text}"', width - 25, 8.5, has_cjk)
         snippet_height = len(snippet_lines) * 11 + 8
         snippet_height = min(snippet_height, 70)
         
+        # 灰色背景
         shape = page.new_shape()
         snippet_rect = fitz.Rect(content_x, current_y, x + width, current_y + snippet_height)
         shape.draw_rect(snippet_rect)
         shape.finish(color=None, fill=(0.94, 0.94, 0.94))
         shape.commit()
         
+        # 左边框
         shape = page.new_shape()
         shape.draw_rect(fitz.Rect(content_x, current_y, content_x + 2, current_y + snippet_height))
         shape.finish(color=None, fill=(0.6, 0.6, 0.6))
         shape.commit()
         
+        # 文字
         text_y = current_y + 10
         max_lines = int((snippet_height - 8) / 11)
         for i, line in enumerate(snippet_lines[:max_lines]):
-            page.insert_text((content_x + 6, text_y), line, fontsize=8.5, fontname="helv", color=(0.35, 0.35, 0.35))
+            page.insert_text((content_x + 6, text_y), line, fontsize=8.5, fontname=fontname, color=(0.35, 0.35, 0.35))
             text_y += 11
         
         current_y += snippet_height + 6
     
-    # 评论内容
+    # 评论内容 - 智能选择字体
     if info.content:
         content_text = info.content.strip()
         
-        content_lines = wrap_text(content_text, width - 25, 9.5)
+        has_cjk = contains_cjk(content_text)
+        fontname = "china-ss" if has_cjk else "helv"
+        
+        content_lines = wrap_text(content_text, width - 25, 9.5, has_cjk)
         content_height = len(content_lines) * 12 + 12
         content_height = min(content_height, 180)
         
+        # 浅蓝色背景
         shape = page.new_shape()
         content_rect = fitz.Rect(content_x, current_y, x + width, current_y + content_height)
         shape.draw_rect(content_rect)
         shape.finish(color=(0.75, 0.82, 0.92), fill=(0.95, 0.97, 1), width=0.5)
         shape.commit()
         
+        # 左边蓝色装饰条
         shape = page.new_shape()
         shape.draw_rect(fitz.Rect(content_x, current_y, content_x + 3, current_y + content_height))
         shape.finish(color=None, fill=(0.3, 0.5, 0.8))
         shape.commit()
         
+        # 文字
         text_y = current_y + 12
         max_lines = int((content_height - 10) / 12)
         for i, line in enumerate(content_lines[:max_lines]):
-            page.insert_text((content_x + 8, text_y), line, fontsize=9.5, fontname="helv", color=(0.15, 0.15, 0.25))
+            page.insert_text((content_x + 8, text_y), line, fontsize=9.5, fontname=fontname, color=(0.15, 0.15, 0.25))
             text_y += 12
         
         current_y += content_height + 6
     else:
+        # 无评论提示
         shape = page.new_shape()
         no_comment_rect = fitz.Rect(content_x, current_y, content_x + 85, current_y + 18)
         shape.draw_rect(no_comment_rect)
@@ -418,7 +468,7 @@ def create_summary_page(doc, annotations: List[AnnotationInfo], page_num: int, p
     shape.finish(color=None, fill=(0.25, 0.35, 0.55))
     shape.commit()
     
-    # 标题
+    # 标题 - 英文标题用英文字体
     title = f"Page {page_num} - Comments Summary ({len(annotations)} items)"
     title_width = len(title) * 7
     title_x = (page_rect.width - title_width) / 2
@@ -457,9 +507,7 @@ def create_summary_page(doc, annotations: List[AnnotationInfo], page_num: int, p
 
 
 def process_pdf(pdf_bytes: bytes, progress_callback=None) -> Tuple[bytes, dict]:
-    """
-    处理 PDF 文件，返回处理后的 PDF 字节和统计信息
-    """
+    """处理 PDF 文件，返回处理后的 PDF 字节和统计信息"""
     src_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     new_doc = fitz.open()
     
@@ -537,7 +585,6 @@ def process_pdf(pdf_bytes: bytes, progress_callback=None) -> Tuple[bytes, dict]:
             create_summary_page(new_doc, annotations_info, page_num + 1, src_page.rect)
             stats["total_annotations"] += len(annotations_info)
     
-    # 保存到字节
     output_bytes = new_doc.tobytes(garbage=4, deflate=True)
     new_doc.close()
     src_doc.close()
@@ -548,64 +595,55 @@ def process_pdf(pdf_bytes: bytes, progress_callback=None) -> Tuple[bytes, dict]:
 # ================== Streamlit UI ==================
 
 def main():
-    # 标题
-    st.markdown('<h1 class="main-header">📄 PDF 批注固化工具</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">将 PDF 中的批注（高亮、便签、删除线等）固化到页面上，方便分享和打印</p>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">📄 PDF Annotation Flattener</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Flatten PDF annotations onto pages with summary / 将 PDF 批注固化到页面上</p>', unsafe_allow_html=True)
     
-    # 文件上传
     uploaded_file = st.file_uploader(
-        "上传 PDF 文件",
+        "Upload PDF file / 上传 PDF 文件",
         type=["pdf"],
-        help="支持带批注的 PDF 文件（来自 Adobe Acrobat、Mac Preview 等）"
+        help="Supports annotated PDFs from Adobe Acrobat, Mac Preview, etc."
     )
     
     if uploaded_file is not None:
-        # 显示文件信息
         file_size = len(uploaded_file.getvalue()) / 1024 / 1024
         st.markdown(f"""
         <div class="info-box">
-            <strong>📎 已选择文件：</strong> {uploaded_file.name}<br>
-            <strong>📦 文件大小：</strong> {file_size:.2f} MB
+            <strong>📎 File:</strong> {uploaded_file.name}<br>
+            <strong>📦 Size:</strong> {file_size:.2f} MB
         </div>
         """, unsafe_allow_html=True)
         
         st.markdown("")
         
-        # 处理按钮
-        if st.button("🚀 开始处理", type="primary", use_container_width=True):
-            
-            # 进度条
+        if st.button("🚀 Process / 开始处理", type="primary", use_container_width=True):
             progress_bar = st.progress(0)
             status_text = st.empty()
             
             def update_progress(progress):
                 progress_bar.progress(progress)
-                status_text.text(f"正在处理... {int(progress * 100)}%")
+                status_text.text(f"Processing... {int(progress * 100)}%")
             
             try:
-                # 处理 PDF
-                status_text.text("正在处理...")
+                status_text.text("Processing...")
                 pdf_bytes = uploaded_file.getvalue()
                 output_bytes, stats = process_pdf(pdf_bytes, update_progress)
                 
                 progress_bar.progress(1.0)
-                status_text.text("处理完成！")
+                status_text.text("Done! ✅")
                 
-                # 显示统计信息
                 st.markdown("---")
-                st.subheader("📊 处理结果")
+                st.subheader("📊 Results / 处理结果")
                 
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("总页数", stats["total_pages"])
+                    st.metric("Total Pages / 总页数", stats["total_pages"])
                 with col2:
-                    st.metric("有批注的页数", stats["annotated_pages"])
+                    st.metric("Annotated Pages / 有批注页数", stats["annotated_pages"])
                 with col3:
-                    st.metric("总批注数", stats["total_annotations"])
+                    st.metric("Total Annotations / 总批注数", stats["total_annotations"])
                 
-                # 批注类型统计
                 if stats["annotation_types"]:
-                    st.markdown("**批注类型分布：**")
+                    st.markdown("**Annotation Types / 批注类型:**")
                     type_cols = st.columns(min(len(stats["annotation_types"]), 4))
                     for i, (type_name, count) in enumerate(stats["annotation_types"].items()):
                         with type_cols[i % len(type_cols)]:
@@ -613,11 +651,10 @@ def main():
                 
                 st.markdown("---")
                 
-                # 下载按钮
-                output_filename = uploaded_file.name.replace(".pdf", "_commented.pdf")
+                output_filename = uploaded_file.name.replace(".pdf", "_flattened.pdf")
                 
                 st.download_button(
-                    label="📥 下载处理后的 PDF",
+                    label="📥 Download / 下载处理后的 PDF",
                     data=output_bytes,
                     file_name=output_filename,
                     mime="application/pdf",
@@ -626,50 +663,47 @@ def main():
                 
                 st.markdown("""
                 <div class="success-box">
-                    ✅ <strong>处理完成！</strong><br>
-                    批注已固化到页面上，每个有批注的页面后都添加了汇总页。
+                    ✅ <strong>Done!</strong> Annotations have been flattened with summary pages added.<br>
+                    ✅ <strong>完成！</strong> 批注已固化到页面上，并添加了汇总页。
                 </div>
                 """, unsafe_allow_html=True)
                 
             except Exception as e:
-                st.error(f"❌ 处理失败：{str(e)}")
+                st.error(f"❌ Error: {str(e)}")
                 st.exception(e)
     
-    # 使用说明
     st.markdown("---")
-    with st.expander("📖 使用说明"):
+    with st.expander("📖 Help / 使用说明"):
         st.markdown("""
-        ### 这个工具可以做什么？
+        ### What does this tool do? / 这个工具做什么？
         
-        将 PDF 文件中的批注（annotations）固化到页面上，使其在任何 PDF 阅读器中都能看到。
+        Flattens PDF annotations onto pages so they're visible in any PDF reader.
         
-        ### 支持的批注类型
+        将 PDF 中的批注固化到页面上，使其在任何 PDF 阅读器中都能看到。
         
-        | 类型 | 说明 |
-        |------|------|
-        | 📝 Note | 便签批注 |
-        | 🟡 Highlight | 高亮标记 |
-        | ~~删除线~~ | 删除线标记 |
-        | <u>下划线</u> | 下划线标记 |
-        | ▲ Insert | 插入符号 |
-        | □ Rectangle | 矩形框 |
-        | ○ Ellipse | 椭圆框 |
-        | ✏️ Drawing | 手绘墨迹 |
+        ### Supported Annotation Types / 支持的批注类型
         
-        ### 输出格式
+        | Type | Description |
+        |------|-------------|
+        | 📝 Note | Sticky notes / 便签批注 |
+        | 🟡 Highlight | Highlighted text / 高亮 |
+        | ~~Strikeout~~ | Strikethrough / 删除线 |
+        | <u>Underline</u> | Underlined text / 下划线 |
+        | ▲ Insert | Caret / 插入符号 |
+        | □ Rectangle | Rectangle markup / 矩形框 |
+        | ○ Ellipse | Circle markup / 椭圆 |
+        | ✏️ Drawing | Ink annotations / 手绘 |
         
-        - 原文页面上保留视觉标记（高亮、删除线等）+ 红色编号
-        - 每个有批注的页面后自动生成**汇总页**
-        - 汇总页包含：批注编号、类型、被标注的原文、评论内容
+        ### Output / 输出格式
         
-        ### 隐私说明
+        - Original pages with visual marks + numbered markers
+        - Summary page after each annotated page (supports Chinese / 支持中文)
         
-        - 所有处理都在服务器内存中完成
-        - 文件不会被存储
-        - 处理完成后立即删除
+        ### Privacy / 隐私说明
+        
+        Files are processed in memory and not stored. / 文件在内存中处理，不会被存储。
         """)
     
-    # 页脚
     st.markdown("---")
     st.markdown(
         "<p style='text-align: center; color: #888;'>Made with ❤️ using Streamlit & PyMuPDF</p>",
