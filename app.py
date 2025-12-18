@@ -59,26 +59,76 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ================== 中文支持 ==================
+# ================== 中文支持 & 混合字体渲染 ==================
+
+def is_cjk_char(char: str) -> bool:
+    """检测单个字符是否为中日韩字符"""
+    if len(char) != 1:
+        return False
+    code = ord(char)
+    return (
+        0x4e00 <= code <= 0x9fff or    # CJK Unified Ideographs
+        0x3400 <= code <= 0x4dbf or    # CJK Extension A
+        0x3000 <= code <= 0x303f or    # CJK Symbols and Punctuation
+        0xff00 <= code <= 0xffef or    # Fullwidth Forms
+        0x3040 <= code <= 0x309f or    # Hiragana
+        0x30a0 <= code <= 0x30ff       # Katakana
+    )
+
 
 def contains_cjk(text: str) -> bool:
     """检测文本是否包含中日韩字符"""
-    cjk_pattern = re.compile(
-        r'[\u4e00-\u9fff'  # CJK Unified Ideographs
-        r'\u3400-\u4dbf'   # CJK Unified Ideographs Extension A
-        r'\u3000-\u303f'   # CJK Symbols and Punctuation
-        r'\uff00-\uffef'   # Halfwidth and Fullwidth Forms
-        r'\u3040-\u309f'   # Hiragana
-        r'\u30a0-\u30ff]'  # Katakana
-    )
-    return bool(cjk_pattern.search(text))
+    return any(is_cjk_char(c) for c in text)
 
 
-def get_font_for_text(text: str) -> str:
-    """根据文本内容选择合适的字体"""
-    if contains_cjk(text):
-        return "china-ss"  # PyMuPDF 内置中文字体
-    return "helv"  # Helvetica for English
+def split_text_by_script(text: str) -> list:
+    """将文本按中英文分段，返回 [(text, is_cjk), ...]"""
+    if not text:
+        return []
+    
+    segments = []
+    current_segment = ""
+    current_is_cjk = None
+    
+    for char in text:
+        char_is_cjk = is_cjk_char(char)
+        
+        if current_is_cjk is None:
+            current_is_cjk = char_is_cjk
+            current_segment = char
+        elif char_is_cjk == current_is_cjk:
+            current_segment += char
+        else:
+            if current_segment:
+                segments.append((current_segment, current_is_cjk))
+            current_segment = char
+            current_is_cjk = char_is_cjk
+    
+    if current_segment:
+        segments.append((current_segment, current_is_cjk))
+    
+    return segments
+
+
+def insert_mixed_text(page, pos: tuple, text: str, fontsize: float, color: tuple) -> float:
+    """
+    插入中英文混合文本，返回文本结束的 x 坐标
+    中文用 china-ss 字体，英文用 helv 字体
+    """
+    x, y = pos
+    segments = split_text_by_script(text)
+    
+    for segment_text, is_cjk in segments:
+        fontname = "china-ss" if is_cjk else "helv"
+        page.insert_text((x, y), segment_text, fontsize=fontsize, fontname=fontname, color=color)
+        
+        # 计算这段文字的宽度，移动 x 坐标
+        if is_cjk:
+            x += len(segment_text) * fontsize * 0.9
+        else:
+            x += len(segment_text) * fontsize * 0.5
+    
+    return x
 
 
 # ================== 数据结构 ==================
@@ -182,6 +232,58 @@ def wrap_text(text: str, max_width: float, fontsize: float, has_cjk: bool = Fals
             
             if current_line:
                 lines.append(current_line)
+    
+    return lines
+
+
+def calc_text_width(text: str, fontsize: float) -> float:
+    """计算混合文本的实际宽度"""
+    width = 0
+    for char in text:
+        if is_cjk_char(char):
+            width += fontsize * 0.9
+        else:
+            width += fontsize * 0.5
+    return width
+
+
+def wrap_text_mixed(text: str, max_width: float, fontsize: float) -> List[str]:
+    """将中英文混合文本按宽度换行"""
+    lines = []
+    paragraphs = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    
+    for para in paragraphs:
+        if not para:
+            lines.append("")
+            continue
+        
+        current_line = ""
+        current_width = 0
+        
+        i = 0
+        while i < len(para):
+            char = para[i]
+            
+            # 计算这个字符的宽度
+            if is_cjk_char(char):
+                char_width = fontsize * 0.9
+            else:
+                char_width = fontsize * 0.5
+            
+            # 检查是否需要换行
+            if current_width + char_width > max_width:
+                if current_line:
+                    lines.append(current_line)
+                current_line = char
+                current_width = char_width
+            else:
+                current_line += char
+                current_width += char_width
+            
+            i += 1
+        
+        if current_line:
+            lines.append(current_line)
     
     return lines
 
@@ -363,16 +465,15 @@ def render_annotation_entry(page, info: AnnotationInfo, x: float, y: float, widt
     content_x = x + circle_radius * 2 + 8
     current_y = y + 24
     
-    # 被标注的原文 - 智能选择字体
+    # 被标注的原文 - 混合字体渲染
     if info.text_snippet:
         snippet_text = info.text_snippet[:250]
         if len(info.text_snippet) > 250:
             snippet_text += "..."
         
         has_cjk = contains_cjk(snippet_text)
-        fontname = "china-ss" if has_cjk else "helv"
         
-        snippet_lines = wrap_text(f'"{snippet_text}"', width - 25, 8.5, has_cjk)
+        snippet_lines = wrap_text_mixed(f'"{snippet_text}"', width - 25, 8.5)
         snippet_height = len(snippet_lines) * 11 + 8
         snippet_height = min(snippet_height, 70)
         
@@ -389,23 +490,22 @@ def render_annotation_entry(page, info: AnnotationInfo, x: float, y: float, widt
         shape.finish(color=None, fill=(0.6, 0.6, 0.6))
         shape.commit()
         
-        # 文字
+        # 文字 - 使用混合字体渲染
         text_y = current_y + 10
         max_lines = int((snippet_height - 8) / 11)
         for i, line in enumerate(snippet_lines[:max_lines]):
-            page.insert_text((content_x + 6, text_y), line, fontsize=8.5, fontname=fontname, color=(0.35, 0.35, 0.35))
+            insert_mixed_text(page, (content_x + 6, text_y), line, 8.5, (0.35, 0.35, 0.35))
             text_y += 11
         
         current_y += snippet_height + 6
     
-    # 评论内容 - 智能选择字体
+    # 评论内容 - 混合字体渲染
     if info.content:
         content_text = info.content.strip()
         
         has_cjk = contains_cjk(content_text)
-        fontname = "china-ss" if has_cjk else "helv"
         
-        content_lines = wrap_text(content_text, width - 25, 9.5, has_cjk)
+        content_lines = wrap_text_mixed(content_text, width - 25, 9.5)
         content_height = len(content_lines) * 12 + 12
         content_height = min(content_height, 180)
         
@@ -422,11 +522,11 @@ def render_annotation_entry(page, info: AnnotationInfo, x: float, y: float, widt
         shape.finish(color=None, fill=(0.3, 0.5, 0.8))
         shape.commit()
         
-        # 文字
+        # 文字 - 使用混合字体渲染
         text_y = current_y + 12
         max_lines = int((content_height - 10) / 12)
         for i, line in enumerate(content_lines[:max_lines]):
-            page.insert_text((content_x + 8, text_y), line, fontsize=9.5, fontname=fontname, color=(0.15, 0.15, 0.25))
+            insert_mixed_text(page, (content_x + 8, text_y), line, 9.5, (0.15, 0.15, 0.25))
             text_y += 12
         
         current_y += content_height + 6
